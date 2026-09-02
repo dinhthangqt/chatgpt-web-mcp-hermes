@@ -38,7 +38,7 @@
     "inspect": "node scripts/inspect.js",
     "doctor": "node scripts/doctor.js",
     "smoke": "node scripts/smoke-mcp.js",
-    "test": "node --test test/browser.test.js test/operation-journal.test.js"
+    "test": "node --test test/browser.test.js test/operation-journal.test.js test/update-operation.test.js"
   },
   "engines": {
     "node": ">=20"

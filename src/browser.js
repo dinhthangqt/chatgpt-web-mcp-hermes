@@ -811,10 +811,11 @@ export class ChatGPTBrowser {
 
   async updateOperation(operation, state, extra = {}) {
     const updated = transitionOperation(operation, state, extra);
-    return recordOperation(OPERATION_JOURNAL_FILE, updated, OPERATION_JOURNAL_MAX_ENTRIES, {
+    await recordOperation(OPERATION_JOURNAL_FILE, updated, OPERATION_JOURNAL_MAX_ENTRIES, {
       unresolvedRetentionMs: OPERATION_JOURNAL_UNRESOLVED_RETENTION_MS,
       maxTombstones: OPERATION_JOURNAL_MAX_TOMBSTONES,
     });
+    return updated;
   }
 
   async close({ terminateBrowser = false } = {}) {
@@ -3028,21 +3029,39 @@ export class ChatGPTBrowser {
     };
   }
 
+  async waitForProjectsReady(page) {
+    try {
+      await page.waitForFunction(
+        (selector) => {
+          const grid = document.querySelector(selector);
+          if (!grid) return false;
+          const rows = grid.querySelectorAll("[role='row']");
+          return rows.length > 1;
+        },
+        SELECTORS.projectGrid,
+        { timeout: ACTION_TIMEOUT_MS },
+      );
+      return { status: "ready", evidence: "grid-visible-with-project-rows" };
+    } catch (error) {
+      if (error?.name === "TimeoutError") return { status: "unknown", evidence: "LIVE_EVIDENCE_REQUIRED" };
+      throw error;
+    }
+  }
+
   async listProjects() {
     await this.ensureSignedIn();
     const page = await this.page();
     await this.siteAction("list-projects");
     await navigate(page, new URL("/projects", CHATGPT_URL).toString(), { waitUntil: "domcontentloaded" }, this.signal());
+    const readiness = await this.waitForProjectsReady(page);
     const grid = page.locator(SELECTORS.projectGrid).first();
-    await grid.waitFor({ state: "visible", timeout: ACTION_TIMEOUT_MS });
-    await page.waitForTimeout(800);
     const projects = await grid.locator("[role='row']").evaluateAll((rows) => rows.map((row) => {
       const cells = [...row.querySelectorAll("[role='gridcell']")];
       const name = (cells[0]?.innerText || "").replace(/\s+/g, " ").trim();
       const modified = (cells[1]?.innerText || "").replace(/\s+/g, " ").trim();
       return { name, modified };
     }).filter((item) => item.name));
-    return { url: page.url(), projects, returned: projects.length, projectIdEvidence: "IDs are resolved by select_project because cards have no href/data-project-id." };
+    return { url: page.url(), projects, returned: projects.length, readiness, projectIdEvidence: "IDs are resolved by select_project because cards have no href/data-project-id." };
   }
 
   async selectProject({ projectId, name } = {}) {
@@ -3058,9 +3077,9 @@ export class ChatGPTBrowser {
       return { selected: true, projectId: observedId, name: observedName, url: page.url() };
     }
     await navigate(page, new URL("/projects", CHATGPT_URL).toString(), { waitUntil: "domcontentloaded" }, this.signal());
+    const readiness = await this.waitForProjectsReady(page);
+    if (readiness.status !== "ready") throw new ChatGPTWebError("Project list readiness is unverified.", { code: "PROJECT_READINESS_UNKNOWN", evidence: readiness.evidence });
     const grid = page.locator(SELECTORS.projectGrid).first();
-    await grid.waitFor({ state: "visible", timeout: ACTION_TIMEOUT_MS });
-    await page.waitForTimeout(800);
     let card;
     if (projectId) {
       const candidate = page.locator(`[role='row'] [data-project-id='${projectId}']`).first();
@@ -3087,7 +3106,6 @@ export class ChatGPTBrowser {
       name || "",
       { timeout: ACTION_TIMEOUT_MS },
     );
-    await page.waitForTimeout(300);
     const observedUrl = page.url();
     const observedId = projectIdFromUrl(observedUrl);
     const heading = await page.locator("h1").first().innerText().catch(() => "");

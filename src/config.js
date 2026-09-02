@@ -13,6 +13,16 @@ function unique(items) {
   return [...new Set(items.filter(Boolean))];
 }
 
+export function envInt(name, fallback, { min = 0, max = Number.MAX_SAFE_INTEGER } = {}) {
+  const raw = process.env[name];
+  if (raw === undefined || raw === "") return fallback;
+  const value = Number(raw);
+  if (!Number.isFinite(value) || !Number.isInteger(value) || value < min || value > max) {
+    throw new Error(`${name} must be an integer between ${min} and ${max}; got ${raw}`);
+  }
+  return value;
+}
+
 export function chromeExecutableCandidates({
   platform = process.platform,
   env = process.env,
@@ -75,12 +85,16 @@ export const HEADLESS = /^(1|true|yes)$/i.test(
   process.env.CHATGPT_WEB_HEADLESS || "false",
 );
 
-export const ACTION_TIMEOUT_MS = Number(
-  process.env.CHATGPT_WEB_ACTION_TIMEOUT_MS || 20_000,
+export const ACTION_TIMEOUT_MS = envInt(
+  "CHATGPT_WEB_ACTION_TIMEOUT_MS",
+  20_000,
+  { min: 1_000, max: 900_000 },
 );
 
-export const RESPONSE_TIMEOUT_MS = Number(
-  process.env.CHATGPT_WEB_RESPONSE_TIMEOUT_MS || 300_000,
+export const RESPONSE_TIMEOUT_MS = envInt(
+  "CHATGPT_WEB_RESPONSE_TIMEOUT_MS",
+  300_000,
+  { min: 5_000, max: 3_600_000 },
 );
 
 export const RECONNECT_DELAY_MS = Number(
@@ -177,16 +191,22 @@ export const OPERATION_JOURNAL_FILE = path.resolve(
     path.join(os.homedir(), ".chatgpt-web-mcp", "operation-journal.json"),
 );
 
-export const OPERATION_JOURNAL_MAX_ENTRIES = Number(
-  process.env.CHATGPT_WEB_OPERATION_JOURNAL_MAX_ENTRIES || 100,
+export const OPERATION_JOURNAL_MAX_ENTRIES = envInt(
+  "CHATGPT_WEB_OPERATION_JOURNAL_MAX_ENTRIES",
+  100,
+  { min: 1, max: 100_000 },
 );
 
-export const OPERATION_JOURNAL_UNRESOLVED_RETENTION_MS = Number(
-  process.env.CHATGPT_WEB_OPERATION_JOURNAL_UNRESOLVED_RETENTION_MS || 30 * 24 * 60 * 60 * 1000,
+export const OPERATION_JOURNAL_UNRESOLVED_RETENTION_MS = envInt(
+  "CHATGPT_WEB_OPERATION_JOURNAL_UNRESOLVED_RETENTION_MS",
+  30 * 24 * 60 * 60 * 1000,
+  { min: 60_000, max: 365 * 24 * 60 * 60 * 1000 },
 );
 
-export const OPERATION_JOURNAL_MAX_TOMBSTONES = Number(
-  process.env.CHATGPT_WEB_OPERATION_JOURNAL_MAX_TOMBSTONES || 10_000,
+export const OPERATION_JOURNAL_MAX_TOMBSTONES = envInt(
+  "CHATGPT_WEB_OPERATION_JOURNAL_MAX_TOMBSTONES",
+  10_000,
+  { min: 100, max: 1_000_000 },
 );
 
 export const OPERATION_LOCK_FILE = path.resolve(
