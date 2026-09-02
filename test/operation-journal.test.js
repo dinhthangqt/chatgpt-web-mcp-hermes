@@ -11,6 +11,7 @@ import {
   reconcileOperation,
   transitionOperation,
   writeOperationJournal,
+  compactJournal,
 } from "../src/operation-journal.js";
 
 async function tempFile() {
@@ -53,6 +54,37 @@ test("pruning keeps updated unresolved operations and only prunes old terminal e
   const journal = await readOperationJournal(file);
   assert.equal(reconcileOperation(journal, "A", "a").status, "reconcile");
   assert.equal(journal.operations.find((item) => item.operationId === "A")?.state, "DELIVERY_UNKNOWN");
+});
+test("old DELIVERY_UNKNOWN becomes a tombstone and still reconciles", async () => {
+  const operation = createOperation({ operationId: "OLD", kind: "send", fingerprint: "fp-old" });
+  const compacted = compactJournal({ operations: [transitionOperation(operation, "DELIVERY_UNKNOWN")] }, { unresolvedRetentionMs: 0, maxTombstones: 10, now: Date.now() + 1000 });
+  assert.equal(compacted.operations.length, 0);
+  assert.equal(compacted.tombstones[0].operationId, "OLD");
+  assert.equal(reconcileOperation(compacted, "OLD", "fp-old").status, "reconcile");
+});
+
+test("same operationId conflicts through a tombstone and survives restart", async () => {
+  const file = await tempFile();
+  const operation = createOperation({ operationId: "OLD", kind: "send", fingerprint: "fp-old" });
+  await writeOperationJournal(file, { operations: [transitionOperation(operation, "SUBMITTED")] }, 2, { unresolvedRetentionMs: 0 });
+  const restarted = await readOperationJournal(file);
+  assert.equal(reconcileOperation(restarted, "OLD", "fp-old").status, "reconcile");
+  assert.equal(reconcileOperation(restarted, "OLD", "different").status, "conflict");
+});
+
+test("fingerprint recursively canonicalizes nested object keys and distinguishes payloads", () => {
+  assert.equal(fingerprintPayload({ a: { x: 1, y: 2 } }), fingerprintPayload({ a: { y: 2, x: 1 } }));
+  assert.notEqual(fingerprintPayload({ files: ["a"] }), fingerprintPayload({ files: ["b"] }));
+});
+
+test("thousands of terminal operations remain bounded while unresolved remain identifiable", () => {
+  const unresolved = Array.from({ length: 5 }, (_, i) => createOperation({ operationId: `U-${i}`, kind: "send", fingerprint: `u-${i}` }));
+  const terminal = Array.from({ length: 500 }, (_, i) => transitionOperation(createOperation({ operationId: `T-${i}`, kind: "send", fingerprint: `t-${i}` }), "COMPLETED"));
+  const oldUnknown = Array.from({ length: 50 }, (_, i) => ({ ...transitionOperation(createOperation({ operationId: `D-${i}`, kind: "send", fingerprint: `d-${i}` }), "DELIVERY_UNKNOWN"), updatedAt: Date.now() - 31 * 24 * 60 * 60 * 1000 }));
+  const result = compactJournal({ operations: [...unresolved, ...terminal, ...oldUnknown] }, { unresolvedRetentionMs: 30 * 24 * 60 * 60 * 1000, maxTerminalEntries: 10, maxTombstones: 100, now: Date.now() + 1000 });
+  for (const operation of [...unresolved, ...oldUnknown]) assert.notEqual(reconcileOperation(result, operation.operationId, operation.fingerprint).status, "new");
+  assert.equal(result.operations.filter((item) => item.state === "COMPLETED").length, 10);
+  assert.equal(result.tombstones.length, 50);
 });
 test("journal is bounded and atomically readable", async () => {
   const file = await tempFile();

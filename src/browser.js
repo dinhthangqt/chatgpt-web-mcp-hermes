@@ -21,6 +21,8 @@ import {
   NETWORK_LOG_FILE,
   OPERATION_JOURNAL_FILE,
   OPERATION_JOURNAL_MAX_ENTRIES,
+  OPERATION_JOURNAL_MAX_TOMBSTONES,
+  OPERATION_JOURNAL_UNRESOLVED_RETENTION_MS,
   OPERATION_LOCK_FILE,
   PAGE_INTERACTION_INTERVAL_MS,
   POST_BREAKER_COOLDOWN_MS,
@@ -795,20 +797,24 @@ export class ChatGPTBrowser {
 
   async prepareOperation({ operationId, kind, payload, promptHash = null }) {
     const fingerprint = fingerprintPayload(payload);
-    if (operationId) {
-      const existing = reconcileOperation(await readOperationJournal(OPERATION_JOURNAL_FILE), operationId, fingerprint);
-      if (existing.status === "conflict") throw new ChatGPTWebError("operationId đã dùng với payload khác.", { code: "OPERATION_ID_CONFLICT", operationId });
-      if (["reconcile", "completed"].includes(existing.status)) throw new ChatGPTWebError("Operation đã có side effect hoặc đã hoàn tất; cần reconcile, không retry side effect.", { code: "OPERATION_RECONCILIATION_REQUIRED", operationId, state: existing.operation.state });
-    }
+    const options = {
+      unresolvedRetentionMs: OPERATION_JOURNAL_UNRESOLVED_RETENTION_MS,
+      maxTombstones: OPERATION_JOURNAL_MAX_TOMBSTONES,
+    };
+    const existing = reconcileOperation(await readOperationJournal(OPERATION_JOURNAL_FILE), operationId, fingerprint);
+    if (existing.status === "conflict") throw new ChatGPTWebError("operationId đã dùng với payload khác.", { code: "OPERATION_ID_CONFLICT", operationId });
+    if (["reconcile", "completed"].includes(existing.status)) throw new ChatGPTWebError("Operation đã có side effect hoặc đã hoàn tất; cần reconcile, không retry side effect.", { code: "OPERATION_RECONCILIATION_REQUIRED", operationId, state: existing.operation.state });
     const operation = createOperation({ operationId, kind, fingerprint, promptHash });
-    await recordOperation(OPERATION_JOURNAL_FILE, operation, OPERATION_JOURNAL_MAX_ENTRIES);
+    await recordOperation(OPERATION_JOURNAL_FILE, operation, OPERATION_JOURNAL_MAX_ENTRIES, options);
     return operation;
   }
 
   async updateOperation(operation, state, extra = {}) {
     const updated = transitionOperation(operation, state, extra);
-    await recordOperation(OPERATION_JOURNAL_FILE, updated, OPERATION_JOURNAL_MAX_ENTRIES);
-    return updated;
+    return recordOperation(OPERATION_JOURNAL_FILE, updated, OPERATION_JOURNAL_MAX_ENTRIES, {
+      unresolvedRetentionMs: OPERATION_JOURNAL_UNRESOLVED_RETENTION_MS,
+      maxTombstones: OPERATION_JOURNAL_MAX_TOMBSTONES,
+    });
   }
 
   async close({ terminateBrowser = false } = {}) {
