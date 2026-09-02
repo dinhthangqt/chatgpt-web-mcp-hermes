@@ -19,6 +19,8 @@ An unofficial local MCP server that lets Codex and other MCP clients operate `ch
 - Stop on rate-limit text or HTTP 429 without dismissing, retrying, or reloading
 - Route Pro requests through a configurable temporary identity probe and reuse a reliable result for the full lifetime of the same page session
 - Store only sanitized network error metadata
+- Discover and select ChatGPT Projects, read verified Project instructions, and manage Project sources with explicit identity checks
+- Persist a bounded operation journal to reconcile retries after timeouts or restarts
 
 ## Requirements
 

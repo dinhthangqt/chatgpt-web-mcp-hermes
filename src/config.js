@@ -167,6 +167,20 @@ export const RUNTIME_STATE_FILE = path.resolve(
 
 export const RUNTIME_LOCK_FILE = `${RUNTIME_STATE_FILE}.lock`;
 
+export const UPLOAD_ROOTS = (process.env.CHATGPT_WEB_UPLOAD_ROOTS || path.join(os.homedir(), "Downloads"))
+  .split(path.delimiter)
+  .filter(Boolean)
+  .map((item) => path.resolve(item));
+
+export const OPERATION_JOURNAL_FILE = path.resolve(
+  process.env.CHATGPT_WEB_OPERATION_JOURNAL ||
+    path.join(os.homedir(), ".chatgpt-web-mcp", "operation-journal.json"),
+);
+
+export const OPERATION_JOURNAL_MAX_ENTRIES = Number(
+  process.env.CHATGPT_WEB_OPERATION_JOURNAL_MAX_ENTRIES || 100,
+);
+
 export const OPERATION_LOCK_FILE = path.resolve(
   process.env.CHATGPT_WEB_OPERATION_LOCK ||
     path.join(os.homedir(), ".chatgpt-web-mcp", "browser-operation.lock"),
