@@ -26,6 +26,7 @@
   "files": [
     "src",
     "scripts",
+    ".agent",
     "README.md",
     "SECURITY.md",
     "CONTRIBUTING.md",
@@ -38,7 +39,10 @@
     "inspect": "node scripts/inspect.js",
     "doctor": "node scripts/doctor.js",
     "smoke": "node scripts/smoke-mcp.js",
-    "test": "node --test test/browser.test.js test/operation-journal.test.js test/update-operation.test.js"
+    "test": "node --test test/browser.test.js test/operation-journal.test.js test/update-operation.test.js test/agent-task-parser.test.js test/agent-task-report.test.js test/agent-process-runner.test.js test/agent-git-runner.test.js",
+    "agent:doctor": "node scripts/hermes-task-watcher.js --doctor",
+    "agent:once": "node scripts/hermes-task-watcher.js --once",
+    "agent:watch": "node scripts/hermes-task-watcher.js"
   },
   "engines": {
     "node": ">=20"

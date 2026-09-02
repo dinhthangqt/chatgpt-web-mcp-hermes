@@ -5,6 +5,8 @@ node_modules/
 !.env.example
 *.log
 *.jsonl
+.agent/runtime/
+.agent/logs/
 *.png
 coverage/
 chrome-profile/

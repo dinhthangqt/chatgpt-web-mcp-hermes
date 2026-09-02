@@ -123,6 +123,19 @@ The server does not automatically clear the breaker, dismiss rate-limit messages
 - The ChatGPT web UI is not a stable API and selectors may require maintenance.
 - A model's self-description is a routing signal, not cryptographic proof of the serving model.
 
+## Hermes GitHub Task Watcher V1
+
+The watcher discovers open Issues labeled `agent:hermes` and `status:ready`. It is disabled by default:
+
+```bash
+npm run agent:doctor
+npm run agent:once
+```
+
+With `HERMES_TASK_EXECUTION_ENABLED=false`, `agent:once` is read-only dry-run: it does not edit labels, comments, branches, files, commits, pushes, or PRs. With execution enabled, the watcher performs the guarded GitHub claim, verifies `BASE-SHA`, creates a task branch, and writes `.agent/runtime/current-task.json` for the current Hermes runtime. It does not execute arbitrary Issue text and does not pretend that a self-invocation API exists. The current runtime must consume the manifest and perform implementation; review remains required before merge.
+
+The watcher never pushes `master`, auto-merges, or closes Issues. GitHub CLI authentication is used through its existing session; tokens are never read or logged. See [.agent/AGENT_PROTOCOL.md](.agent/AGENT_PROTOCOL.md).
+
 ## Development
 
 ```bash
