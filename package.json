@@ -27,7 +27,6 @@
     "src",
     "scripts",
     "README.md",
-    "README.en.md",
     "SECURITY.md",
     "CONTRIBUTING.md",
     ".env.example",
@@ -39,7 +38,7 @@
     "inspect": "node scripts/inspect.js",
     "doctor": "node scripts/doctor.js",
     "smoke": "node scripts/smoke-mcp.js",
-    "test": "node --test test/browser.test.js"
+    "test": "node --test test/browser.test.js test/operation-journal.test.js"
   },
   "engines": {
     "node": ">=20"

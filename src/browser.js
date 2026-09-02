@@ -16,8 +16,11 @@ import {
   HEADLESS,
   HISTORY_QUIET_PERIOD_MS,
   MAX_HISTORY_RESULTS,
+  UPLOAD_ROOTS,
   BROWSER_STATE_FILE,
   NETWORK_LOG_FILE,
+  OPERATION_JOURNAL_FILE,
+  OPERATION_JOURNAL_MAX_ENTRIES,
   OPERATION_LOCK_FILE,
   PAGE_INTERACTION_INTERVAL_MS,
   POST_BREAKER_COOLDOWN_MS,
@@ -39,6 +42,14 @@ import {
   USER_DATA_DIR,
 } from "./config.js";
 import { ChatGPTWebError } from "./errors.js";
+import {
+  createOperation,
+  fingerprintPayload,
+  readOperationJournal,
+  recordOperation,
+  reconcileOperation,
+  transitionOperation,
+} from "./operation-journal.js";
 import { SELECTORS, TEXT } from "./selectors.js";
 
 function normalize(value) {
@@ -781,6 +792,24 @@ export class ChatGPTBrowser {
   #answerTier = null;
   #requestSignal = null;
   #networkLoggingPages = new WeakSet();
+
+  async prepareOperation({ operationId, kind, payload, promptHash = null }) {
+    const fingerprint = fingerprintPayload(payload);
+    if (operationId) {
+      const existing = reconcileOperation(await readOperationJournal(OPERATION_JOURNAL_FILE), operationId, fingerprint);
+      if (existing.status === "conflict") throw new ChatGPTWebError("operationId đã dùng với payload khác.", { code: "OPERATION_ID_CONFLICT", operationId });
+      if (["reconcile", "completed"].includes(existing.status)) throw new ChatGPTWebError("Operation đã có side effect hoặc đã hoàn tất; cần reconcile, không retry side effect.", { code: "OPERATION_RECONCILIATION_REQUIRED", operationId, state: existing.operation.state });
+    }
+    const operation = createOperation({ operationId, kind, fingerprint, promptHash });
+    await recordOperation(OPERATION_JOURNAL_FILE, operation, OPERATION_JOURNAL_MAX_ENTRIES);
+    return operation;
+  }
+
+  async updateOperation(operation, state, extra = {}) {
+    const updated = transitionOperation(operation, state, extra);
+    await recordOperation(OPERATION_JOURNAL_FILE, updated, OPERATION_JOURNAL_MAX_ENTRIES);
+    return updated;
+  }
 
   async close({ terminateBrowser = false } = {}) {
     const chromeProcess = this.#chromeProcess;
@@ -2424,25 +2453,24 @@ export class ChatGPTBrowser {
 
   async validateFiles(files) {
     if (!files?.length) return [];
+    const roots = await Promise.all(UPLOAD_ROOTS.map((root) => fs.realpath(root).catch(() => null)));
+    const usableRoots = roots.filter(Boolean);
+    if (!usableRoots.length) throw new ChatGPTWebError("No configured upload root exists.", { code: "UPLOAD_ROOTS_NOT_CONFIGURED" });
     const result = [];
     for (const file of files) {
-      const resolved = path.resolve(file);
       if (!path.isAbsolute(file)) {
-        throw new ChatGPTWebError("Đường dẫn upload phải là đường dẫn tuyệt đối.", {
-          file,
-          code: "UPLOAD_PATH_NOT_ABSOLUTE",
-        });
+        throw new ChatGPTWebError("Upload path must be absolute.", { file, code: "UPLOAD_PATH_NOT_ABSOLUTE" });
       }
-      let stat;
-      try {
-        stat = await fs.stat(resolved);
-      } catch {
-        throw new ChatGPTWebError("待上传文件不存在。", { file: resolved });
-      }
-      if (!stat.isFile()) {
-        throw new ChatGPTWebError("只能上传普通文件，不能上传目录。", { file: resolved });
-      }
-      result.push({ path: resolved, name: path.basename(resolved), size: stat.size });
+      let canonical;
+      try { canonical = await fs.realpath(file); } catch { throw new ChatGPTWebError("Upload file does not exist.", { file }); }
+      const allowed = usableRoots.some((root) => {
+        const relative = path.relative(root, canonical);
+        return relative === "" || (relative && !relative.startsWith(".." + path.sep) && relative !== "..");
+      });
+      if (!allowed) throw new ChatGPTWebError("Upload path is outside configured upload roots.", { file: canonical, code: "UPLOAD_PATH_OUTSIDE_ROOT" });
+      const stat = await fs.stat(canonical);
+      if (!stat.isFile()) throw new ChatGPTWebError("Only regular files can be uploaded.", { file: canonical });
+      result.push({ path: canonical, name: path.basename(canonical), size: stat.size });
     }
     return result;
   }
@@ -3010,12 +3038,9 @@ export class ChatGPTBrowser {
     const page = await this.page();
     await this.siteAction("list-projects");
     await navigate(page, new URL("/projects", CHATGPT_URL).toString(), { waitUntil: "domcontentloaded" }, this.signal());
-    await page.waitForFunction(
-      () => document.querySelectorAll("[role='grid'][aria-label='Projects'] [role='row']").length > 1,
-      { timeout: ACTION_TIMEOUT_MS },
-    );
     const grid = page.locator(SELECTORS.projectGrid).first();
     await grid.waitFor({ state: "visible", timeout: ACTION_TIMEOUT_MS });
+    await page.waitForTimeout(800);
     const projects = await grid.locator("[role='row']").evaluateAll((rows) => rows.map((row) => {
       const cells = [...row.querySelectorAll("[role='gridcell']")];
       const name = (cells[0]?.innerText || "").replace(/\s+/g, " ").trim();
@@ -3030,12 +3055,9 @@ export class ChatGPTBrowser {
     const page = await this.page();
     await this.siteAction("select-project");
     await navigate(page, new URL("/projects", CHATGPT_URL).toString(), { waitUntil: "domcontentloaded" }, this.signal());
-    await page.waitForFunction(
-      () => document.querySelectorAll("[role='grid'][aria-label='Projects'] [role='row']").length > 1,
-      { timeout: ACTION_TIMEOUT_MS },
-    );
     const grid = page.locator(SELECTORS.projectGrid).first();
     await grid.waitFor({ state: "visible", timeout: ACTION_TIMEOUT_MS });
+    await page.waitForTimeout(800);
     let card;
     if (projectId) {
       const candidate = page.locator(`[role='row'] [data-project-id='${projectId}']`).first();
@@ -3075,7 +3097,7 @@ export class ChatGPTBrowser {
   async projectPage({ projectId, name } = {}) {
     if (projectId && !name) {
       const page = await this.page();
-      await navigate(page, `https://chatgpt.com/g/${projectId}/project`, { waitUntil: "domcontentloaded" }, this.signal());
+      await navigate(page, new URL(`/g/${projectId}/project`, CHATGPT_URL).toString(), { waitUntil: "domcontentloaded" }, this.signal());
       await page.waitForFunction(
         () => /\/g\/g-p-[a-zA-Z0-9]+\/project/.test(location.pathname) && document.querySelector("h1")?.textContent?.trim() && document.querySelector("h1")?.textContent?.trim() !== "Projects",
         { timeout: ACTION_TIMEOUT_MS },
@@ -3086,7 +3108,7 @@ export class ChatGPTBrowser {
     return { page: await this.page(), projectId: selected.projectId, name: selected.name };
   }
 
-  async projectInstructions({ projectId, name, instructions, save = false } = {}) {
+  async projectInstructions({ projectId, name, instructions, save = false, operationId } = {}) {
     const current = await this.projectPage({ projectId, name });
     const page = current.page;
     const details = page.locator("button[aria-label='Show project details']").last();
@@ -3101,19 +3123,30 @@ export class ChatGPTBrowser {
     if (instructions === undefined || !save) {
       return { projectId: current.projectId, name: current.name, instructions: before, saved: false };
     }
+    const operation = await this.prepareOperation({ operationId, kind: "project_instructions", payload: { projectId: current.projectId, instructions } });
+    await this.updateOperation(operation, "SUBMITTING");
     await editor.fill(instructions);
     const saveButton = dialog.getByRole("button", { name: /^Save$/i }).last();
     await saveButton.click();
     await page.waitForTimeout(500);
-    await details.click().catch(() => {});
-    const verifyDialog = page.getByRole("dialog").last();
-    const after = await verifyDialog.locator("textarea[aria-label='Instructions']").inputValue().catch(() => "");
-    if (after !== instructions) throw new ChatGPTWebError("Project instructions chưa xác minh được sau khi lưu.", { code: "PROJECT_INSTRUCTIONS_NOT_CONFIRMED", projectId: current.projectId });
-    return { projectId: current.projectId, name: current.name, instructions: after, saved: true };
+    const reopened = await this.projectPage({ projectId: current.projectId });
+    const reopenedDetails = reopened.page.locator(SELECTORS.projectDetailsButton).last();
+    await reopenedDetails.waitFor({ state: "visible", timeout: ACTION_TIMEOUT_MS });
+    await reopenedDetails.evaluate((element) => element.click());
+    const reopenedSettings = reopened.page.getByRole("menuitem", { name: "Project settings" });
+    await reopenedSettings.waitFor({ state: "visible", timeout: ACTION_TIMEOUT_MS });
+    await reopenedSettings.click();
+    const reopenedDialog = reopened.page.getByRole("dialog").last();
+    const after = await reopenedDialog.locator("textarea[aria-label='Instructions']").inputValue();
+    if (after !== instructions) throw new ChatGPTWebError("Project instructions were not confirmed after reopening settings.", { code: "PROJECT_INSTRUCTIONS_NOT_CONFIRMED", projectId: current.projectId });
+    await this.updateOperation(operation, "COMPLETED", { projectId: current.projectId });
+    return { projectId: current.projectId, name: reopened.name, instructions: after, saved: true, operationId: operation.operationId };
   }
 
-  async createProject({ name, instructions = "" } = {}) {
-    if (!name?.trim()) throw new ChatGPTWebError("Tên Project không được rỗng.", { code: "PROJECT_NAME_REQUIRED" });
+  async createProject({ name, instructions = "", operationId } = {}) {
+    if (!name?.trim()) throw new ChatGPTWebError("Project name is required.", { code: "PROJECT_NAME_REQUIRED" });
+    const operation = await this.prepareOperation({ operationId, kind: "create_project", payload: { name: name.trim(), instructions } });
+    await this.updateOperation(operation, "SUBMITTING");
     await this.ensureSignedIn();
     const page = await this.page();
     await navigate(page, new URL("/projects", CHATGPT_URL).toString(), { waitUntil: "domcontentloaded" }, this.signal());
@@ -3128,14 +3161,18 @@ export class ChatGPTBrowser {
     await page.waitForURL(/\/g\/g-p-[^/]+\/project/, { timeout: ACTION_TIMEOUT_MS });
     const projectId = projectIdFromUrl(page.url());
     const heading = (await page.locator("h1").first().innerText()).trim();
-    if (!projectId || normalize(heading) !== normalize(name)) throw new ChatGPTWebError("Project tạo xong nhưng identity không khớp.", { code: "PROJECT_CREATE_NOT_CONFIRMED", name, heading, url: page.url() });
-    return { created: true, projectId, name: heading, url: page.url() };
+    if (!projectId || normalize(heading) !== normalize(name)) throw new ChatGPTWebError("Project creation was not confirmed.", { code: "PROJECT_CREATE_NOT_CONFIRMED", name, heading, url: page.url() });
+    await this.updateOperation(operation, "COMPLETED", { projectId });
+    return { created: true, projectId, name: heading, url: page.url(), operationId: operation.operationId };
   }
 
-  async addFileToProject({ projectId, name, file } = {}) {
-    if (!path.isAbsolute(file || "")) throw new ChatGPTWebError("Đường dẫn Project source phải là absolute path.", { code: "PROJECT_SOURCE_PATH_NOT_ABSOLUTE" });
+  async addFileToProject({ projectId, name, file, operationId } = {}) {
+    const validated = await this.validateFiles([file]);
+    const canonicalFile = validated[0].path;
     const current = await this.projectPage({ projectId, name });
     const page = current.page;
+    const operation = await this.prepareOperation({ operationId, kind: "add_project_file", payload: { projectId: current.projectId, file: canonicalFile } });
+    await this.updateOperation(operation, "SUBMITTING");
     await page.getByRole("tab", { name: "Sources" }).click();
     await page.waitForTimeout(400);
     const input = page.locator("input[type='file']").last();
@@ -3143,11 +3180,12 @@ export class ChatGPTBrowser {
     const base = path.basename(file);
     await page.getByText(base, { exact: false }).last().waitFor({ state: "visible", timeout: ACTION_TIMEOUT_MS });
     const sourcesText = await page.locator("[role='tabpanel']").last().innerText().catch(async () => page.locator("body").innerText());
-    if (!sourcesText.includes(base)) throw new ChatGPTWebError("Project source chưa xác minh được.", { code: "PROJECT_SOURCE_NOT_CONFIRMED", projectId: current.projectId, file: base });
-    return { added: true, verified: true, projectId: current.projectId, name: current.name, file: base };
+    if (!sourcesText.includes(base)) throw new ChatGPTWebError("Project source verification failed.", { code: "PROJECT_SOURCE_NOT_CONFIRMED", projectId: current.projectId, file: base });
+    await this.updateOperation(operation, "COMPLETED", { projectId: current.projectId, file: base });
+    return { added: true, verified: true, projectId: current.projectId, name: current.name, file: base, operationId: operation.operationId };
   }
 
-  async moveConversationToProject({ conversationId, conversationUrl, projectId, projectName } = {}) {
+  async moveConversationToProject({ conversationId, conversationUrl, projectId, projectName, operationId } = {}) {
     if (!conversationId && !conversationUrl) throw new ChatGPTWebError("conversationId hoặc conversationUrl là bắt buộc.", { code: "CONVERSATION_REQUIRED" });
     if (!projectId && !projectName) throw new ChatGPTWebError("projectId hoặc projectName là bắt buộc.", { code: "PROJECT_REQUIRED" });
     const page = await this.page();
@@ -3155,19 +3193,28 @@ export class ChatGPTBrowser {
     await navigate(page, url, { waitUntil: "domcontentloaded" }, this.signal());
     const conversation = conversationIdFromUrl(page.url());
     if (!conversation || (conversationId && conversation !== conversationId)) throw new ChatGPTWebError("Conversation identity không khớp.", { code: "CONVERSATION_IDENTITY_MISMATCH", conversationId, url: page.url() });
+    const targetProject = await this.projectPage({ projectId, name: projectName });
+    await navigate(page, url, { waitUntil: "domcontentloaded" }, this.signal());
+    const restoredConversation = conversationIdFromUrl(page.url());
+    if (restoredConversation !== conversation) throw new ChatGPTWebError("Conversation identity changed during project resolution.", { code: "CONVERSATION_IDENTITY_MISMATCH", conversationId: conversation, observed: restoredConversation });
+    const operation = await this.prepareOperation({ operationId, kind: "move_conversation", payload: { conversationId: conversation, projectId: targetProject.projectId } });
+    await this.updateOperation(operation, "SUBMITTING");
     const options = page.locator("button[aria-label^='Open conversation options for']").last();
     await options.waitFor({ state: "visible", timeout: ACTION_TIMEOUT_MS });
     await options.evaluate((element) => element.click());
     const move = page.getByRole("menuitem", { name: /Move to project/i });
     await move.waitFor({ state: "visible", timeout: ACTION_TIMEOUT_MS });
     await move.click();
-    const target = page.getByRole("menuitem", { name: projectName || new RegExp(projectId, "i") }).last();
+    const target = page.getByRole("menuitem", { name: targetProject.name }).last();
     await target.waitFor({ state: "visible", timeout: ACTION_TIMEOUT_MS });
     await target.click();
-    await page.waitForTimeout(700);
-    const body = await page.locator("body").innerText();
-    if (projectName && !body.includes(projectName)) throw new ChatGPTWebError("Conversation đã thao tác nhưng chưa xác minh membership.", { code: "CONVERSATION_PROJECT_NOT_CONFIRMED", conversationId: conversation, projectName });
-    return { moved: true, verified: true, conversationId: conversation, projectId: projectId || null, projectName: projectName || null, url: page.url() };
+    const projectUrl = new URL(`/g/${targetProject.projectId}/project`, CHATGPT_URL).toString();
+    await navigate(page, projectUrl, { waitUntil: "domcontentloaded" }, this.signal());
+    await page.waitForFunction((expected) => document.querySelector("h1")?.textContent?.trim() === expected, targetProject.name, { timeout: ACTION_TIMEOUT_MS });
+    const membership = await page.locator(`a[href*='/c/${conversation}']`).count();
+    if (!membership) throw new ChatGPTWebError("Conversation move was not confirmed in the target Project.", { code: "CONVERSATION_PROJECT_NOT_CONFIRMED", conversationId: conversation, projectId: targetProject.projectId });
+    await this.updateOperation(operation, "COMPLETED", { conversationId: conversation, projectId: targetProject.projectId });
+    return { moved: true, verified: true, conversationId: conversation, projectId: targetProject.projectId, projectName: targetProject.name, url: page.url(), operationId: operation.operationId };
   }
 
   async historyLinks() {

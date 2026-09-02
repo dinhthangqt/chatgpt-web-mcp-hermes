@@ -286,6 +286,7 @@ tool(
     name: z.string().min(1).optional(),
     instructions: z.string().optional(),
     save: z.boolean().default(false),
+    operationId: z.string().min(1).optional(),
   },
   (input) => browser.projectInstructions(input),
 );
@@ -293,21 +294,21 @@ tool(
 tool(
   "chatgpt_create_project",
   "Tạo ChatGPT Project mới và xác minh URL/projectId/title sau khi tạo.",
-  { name: z.string().min(1), instructions: z.string().default("") },
+  { name: z.string().min(1), instructions: z.string().default(""), operationId: z.string().min(1).optional() },
   (input) => browser.createProject(input),
 );
 
 tool(
   "chatgpt_add_file_to_project",
   "Thêm file vào Project Sources và chỉ thành công khi filename xuất hiện trong Sources.",
-  { projectId: z.string().regex(/^g-p-[a-zA-Z0-9]+$/).optional(), name: z.string().min(1).optional(), file: z.string().min(1) },
+  { projectId: z.string().regex(/^g-p-[a-zA-Z0-9]+$/).optional(), name: z.string().min(1).optional(), file: z.string().min(1), operationId: z.string().min(1).optional() },
   (input) => browser.addFileToProject(input),
 );
 
 tool(
   "chatgpt_move_conversation_to_project",
   "Di chuyển conversation vào Project, sau đó xác minh membership.",
-  { conversationId: z.string().optional(), conversationUrl: z.string().url().optional(), projectId: z.string().regex(/^g-p-[a-zA-Z0-9]+$/).optional(), projectName: z.string().min(1).optional() },
+  { conversationId: z.string().optional(), conversationUrl: z.string().url().optional(), projectId: z.string().regex(/^g-p-[a-zA-Z0-9]+$/).optional(), projectName: z.string().min(1).optional(), operationId: z.string().min(1).optional() },
   (input) => browser.moveConversationToProject(input),
 );
 
