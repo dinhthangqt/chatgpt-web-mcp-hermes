@@ -181,6 +181,14 @@ export const OPERATION_JOURNAL_MAX_ENTRIES = Number(
   process.env.CHATGPT_WEB_OPERATION_JOURNAL_MAX_ENTRIES || 100,
 );
 
+export const OPERATION_JOURNAL_UNRESOLVED_RETENTION_MS = Number(
+  process.env.CHATGPT_WEB_OPERATION_JOURNAL_UNRESOLVED_RETENTION_MS || 30 * 24 * 60 * 60 * 1000,
+);
+
+export const OPERATION_JOURNAL_MAX_TOMBSTONES = Number(
+  process.env.CHATGPT_WEB_OPERATION_JOURNAL_MAX_TOMBSTONES || 10_000,
+);
+
 export const OPERATION_LOCK_FILE = path.resolve(
   process.env.CHATGPT_WEB_OPERATION_LOCK ||
     path.join(os.homedir(), ".chatgpt-web-mcp", "browser-operation.lock"),
