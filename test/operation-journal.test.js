@@ -43,9 +43,20 @@ test("DELIVERY_UNKNOWN is never classified as resumable send", async () => {
   assert.equal(reconcileOperation(await readOperationJournal(file), "A", a.fingerprint).status, "reconcile");
 });
 
+test("pruning keeps updated unresolved operations and only prunes old terminal entries", async () => {
+  const file = await tempFile();
+  const a = createOperation({ operationId: "A", kind: "send", fingerprint: "a" });
+  await recordOperation(file, transitionOperation(a, "SUBMITTED"));
+  for (const id of ["B", "C", "D"]) await recordOperation(file, transitionOperation(createOperation({ operationId: id, kind: "send", fingerprint: id }), "COMPLETED"));
+  const updatedA = transitionOperation(a, "DELIVERY_UNKNOWN");
+  await recordOperation(file, updatedA, 2);
+  const journal = await readOperationJournal(file);
+  assert.equal(reconcileOperation(journal, "A", "a").status, "reconcile");
+  assert.equal(journal.operations.find((item) => item.operationId === "A")?.state, "DELIVERY_UNKNOWN");
+});
 test("journal is bounded and atomically readable", async () => {
   const file = await tempFile();
-  const operations = Array.from({ length: 4 }, (_, i) => createOperation({ operationId: String(i), kind: "test", fingerprint: String(i) }));
+  const operations = Array.from({ length: 4 }, (_, i) => transitionOperation(createOperation({ operationId: String(i), kind: "test", fingerprint: String(i) }), "COMPLETED"));
   await writeOperationJournal(file, { operations }, 2);
   const journal = await readOperationJournal(file);
   assert.deepEqual(journal.operations.map((x) => x.operationId), ["2", "3"]);

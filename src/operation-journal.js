@@ -57,10 +57,15 @@ export async function readOperationJournal(file) {
 }
 
 export async function writeOperationJournal(file, journal, maxEntries = 100) {
+  const unresolved = journal.operations.filter((item) => !TERMINAL_STATES.has(item.state));
+  const terminal = journal.operations
+    .filter((item) => TERMINAL_STATES.has(item.state))
+    .sort((a, b) => a.updatedAt - b.updatedAt)
+    .slice(-maxEntries);
   const bounded = {
     version: 1,
     maxEntries,
-    operations: journal.operations.slice(-maxEntries),
+    operations: [...unresolved, ...terminal],
   };
   await fs.mkdir(path.dirname(file), { recursive: true });
   const temporary = `${file}.${process.pid}.${randomUUID()}.tmp`;
@@ -77,8 +82,7 @@ export async function writeOperationJournal(file, journal, maxEntries = 100) {
 
 export async function recordOperation(file, operation, maxEntries = 100) {
   const journal = await readOperationJournal(file);
-  const index = journal.operations.findIndex((item) => item.operationId === operation.operationId);
-  if (index >= 0) journal.operations[index] = operation;
-  else journal.operations.push(operation);
+  journal.operations = journal.operations.filter((item) => item.operationId !== operation.operationId);
+  journal.operations.push(operation);
   return writeOperationJournal(file, journal, maxEntries);
 }

@@ -2563,45 +2563,32 @@ export class ChatGPTBrowser {
 
     const assistantBefore = await this.assistantLocator().count();
     const userBefore = await this.userLocator().count();
-    const operation = {
+    const operation = await this.prepareOperation({
       operationId,
       kind: "chatgpt_turn",
-      state: "PREPARED",
-      createdAt: Date.now(),
-      updatedAt: Date.now(),
-      ownerPid: process.pid,
-      url: page.url(),
+      payload: { prompt: promptText },
       promptHash: promptHash(promptText),
-      assistantBefore,
-      userBefore,
-    };
+    });
+    Object.assign(operation, { ownerPid: process.pid, url: page.url(), assistantBefore, userBefore });
     const runtime = await readRuntimeState();
-    const existing = runtime.activeOperation;
-    if (
-      existing?.operationId === operationId &&
-      ["SUBMITTING", "SUBMITTED", "GENERATING", "DELIVERY_UNKNOWN", "COMPLETED"].includes(existing.state)
-    ) {
-      throw new ChatGPTWebError("Operation đã có trạng thái sau submit; cần reconcile, không được gửi lại.", {
-        code: "OPERATION_RECONCILIATION_REQUIRED",
-        operationId,
-        state: existing.state,
-      });
-    }
     await updateRuntimeState({ activeOperation: operation });
     await this.siteAction("send-prompt");
     const send = await this.firstVisible(SELECTORS.sendButton, { timeout: 1_000 });
+    await this.updateOperation(operation, "SUBMITTING");
     await updateRuntimeState({ activeOperation: operationState(operation, "SUBMITTING") });
     if (send && (await send.isEnabled().catch(() => true))) {
       await this.click(send, "send-prompt-click");
     } else {
       await this.press(composer, "Enter", "send-prompt-enter");
     }
+    await this.updateOperation(operation, "SUBMITTED", { submittedAt: Date.now() });
     await updateRuntimeState({
       activeOperation: operationState(operation, "SUBMITTED", { submittedAt: Date.now() }),
     });
     await this.markSendPerformed();
 
     const generationStartedAt = Date.now();
+    await this.updateOperation(operation, "GENERATING", { generationStartedAt, conversationId: conversationIdFromUrl(page.url()) });
     await updateRuntimeState({
       activeGeneration: {
         active: true,
@@ -2645,6 +2632,7 @@ export class ChatGPTBrowser {
         assistantBefore,
         timeoutMs: effectiveTimeoutMs,
       });
+      await this.updateOperation(operation, "COMPLETED", { completedAt: Date.now(), conversationId: result.conversationId || conversationIdFromUrl(page.url()) });
       await updateRuntimeState({
         activeGeneration: null,
         activeOperation: operationState(operation, "COMPLETED", {
@@ -2655,6 +2643,7 @@ export class ChatGPTBrowser {
       });
       return result;
     } catch (error) {
+      await this.updateOperation(operation, "DELIVERY_UNKNOWN", { error: error instanceof Error ? error.message : String(error) }).catch(() => {});
       await updateRuntimeState({
         activeOperation: operationState(operation, "DELIVERY_UNKNOWN", {
           error: error instanceof Error ? error.message : String(error),
@@ -3054,6 +3043,14 @@ export class ChatGPTBrowser {
     await this.ensureSignedIn();
     const page = await this.page();
     await this.siteAction("select-project");
+    if (projectId && !name) {
+      await navigate(page, new URL(`/g/${projectId}/project`, CHATGPT_URL).toString(), { waitUntil: "domcontentloaded" }, this.signal());
+      await page.waitForFunction(() => /\/g\/g-p-[a-zA-Z0-9]+\/project/.test(location.pathname) && document.querySelector("h1")?.textContent?.trim() && document.querySelector("h1")?.textContent?.trim() !== "Projects", { timeout: ACTION_TIMEOUT_MS });
+      const observedId = projectIdFromUrl(page.url());
+      const observedName = (await page.locator("h1").first().innerText()).trim();
+      if (observedId !== projectId) throw new ChatGPTWebError("Project identity changed after navigation.", { code: "PROJECT_IDENTITY_MISMATCH", requestedProjectId: projectId, observedId, url: page.url() });
+      return { selected: true, projectId: observedId, name: observedName, url: page.url() };
+    }
     await navigate(page, new URL("/projects", CHATGPT_URL).toString(), { waitUntil: "domcontentloaded" }, this.signal());
     const grid = page.locator(SELECTORS.projectGrid).first();
     await grid.waitFor({ state: "visible", timeout: ACTION_TIMEOUT_MS });
@@ -3102,7 +3099,9 @@ export class ChatGPTBrowser {
         () => /\/g\/g-p-[a-zA-Z0-9]+\/project/.test(location.pathname) && document.querySelector("h1")?.textContent?.trim() && document.querySelector("h1")?.textContent?.trim() !== "Projects",
         { timeout: ACTION_TIMEOUT_MS },
       );
-      return { page, projectId, name: (await page.locator("h1").first().innerText()).trim() };
+      const observedId = projectIdFromUrl(page.url());
+      if (observedId !== projectId) throw new ChatGPTWebError("Project identity changed after navigation.", { code: "PROJECT_IDENTITY_MISMATCH", requestedProjectId: projectId, observedId, url: page.url() });
+      return { page, projectId: observedId, name: (await page.locator("h1").first().innerText()).trim() };
     }
     const selected = await this.selectProject({ projectId, name });
     return { page: await this.page(), projectId: selected.projectId, name: selected.name };
@@ -3112,7 +3111,7 @@ export class ChatGPTBrowser {
     const current = await this.projectPage({ projectId, name });
     const page = current.page;
     const details = page.locator("button[aria-label='Show project details']").last();
-    await details.click();
+    await this.click(details, "project-details-menu");
     const settingsItem = page.getByRole("menuitem", { name: "Project settings" });
     await settingsItem.waitFor({ state: "visible", timeout: ACTION_TIMEOUT_MS });
     await settingsItem.click();
@@ -3124,18 +3123,18 @@ export class ChatGPTBrowser {
       return { projectId: current.projectId, name: current.name, instructions: before, saved: false };
     }
     const operation = await this.prepareOperation({ operationId, kind: "project_instructions", payload: { projectId: current.projectId, instructions } });
-    await this.updateOperation(operation, "SUBMITTING");
     await editor.fill(instructions);
     const saveButton = dialog.getByRole("button", { name: /^Save$/i }).last();
+    await this.updateOperation(operation, "SUBMITTING");
     await saveButton.click();
     await page.waitForTimeout(500);
     const reopened = await this.projectPage({ projectId: current.projectId });
     const reopenedDetails = reopened.page.locator(SELECTORS.projectDetailsButton).last();
     await reopenedDetails.waitFor({ state: "visible", timeout: ACTION_TIMEOUT_MS });
-    await reopenedDetails.evaluate((element) => element.click());
+    await this.click(reopenedDetails, "project-details-menu-reopen");
     const reopenedSettings = reopened.page.getByRole("menuitem", { name: "Project settings" });
     await reopenedSettings.waitFor({ state: "visible", timeout: ACTION_TIMEOUT_MS });
-    await reopenedSettings.click();
+    await this.click(reopenedSettings, "project-settings-reopen");
     const reopenedDialog = reopened.page.getByRole("dialog").last();
     const after = await reopenedDialog.locator("textarea[aria-label='Instructions']").inputValue();
     if (after !== instructions) throw new ChatGPTWebError("Project instructions were not confirmed after reopening settings.", { code: "PROJECT_INSTRUCTIONS_NOT_CONFIRMED", projectId: current.projectId });
@@ -3146,7 +3145,6 @@ export class ChatGPTBrowser {
   async createProject({ name, instructions = "", operationId } = {}) {
     if (!name?.trim()) throw new ChatGPTWebError("Project name is required.", { code: "PROJECT_NAME_REQUIRED" });
     const operation = await this.prepareOperation({ operationId, kind: "create_project", payload: { name: name.trim(), instructions } });
-    await this.updateOperation(operation, "SUBMITTING");
     await this.ensureSignedIn();
     const page = await this.page();
     await navigate(page, new URL("/projects", CHATGPT_URL).toString(), { waitUntil: "domcontentloaded" }, this.signal());
@@ -3157,6 +3155,7 @@ export class ChatGPTBrowser {
     await nameInput.fill(name.trim());
     const instructionInput = dialog.locator("textarea[aria-label='Instructions']");
     if (instructions) await instructionInput.fill(instructions);
+    await this.updateOperation(operation, "SUBMITTING");
     await dialog.getByRole("button", { name: /^Create project$/i }).click();
     await page.waitForURL(/\/g\/g-p-[^/]+\/project/, { timeout: ACTION_TIMEOUT_MS });
     const projectId = projectIdFromUrl(page.url());
@@ -3172,11 +3171,11 @@ export class ChatGPTBrowser {
     const current = await this.projectPage({ projectId, name });
     const page = current.page;
     const operation = await this.prepareOperation({ operationId, kind: "add_project_file", payload: { projectId: current.projectId, file: canonicalFile } });
-    await this.updateOperation(operation, "SUBMITTING");
     await page.getByRole("tab", { name: "Sources" }).click();
     await page.waitForTimeout(400);
     const input = page.locator("input[type='file']").last();
-    await input.setInputFiles(file);
+    await this.updateOperation(operation, "SUBMITTING");
+    await input.setInputFiles(canonicalFile);
     const base = path.basename(file);
     await page.getByText(base, { exact: false }).last().waitFor({ state: "visible", timeout: ACTION_TIMEOUT_MS });
     const sourcesText = await page.locator("[role='tabpanel']").last().innerText().catch(async () => page.locator("body").innerText());
@@ -3198,7 +3197,6 @@ export class ChatGPTBrowser {
     const restoredConversation = conversationIdFromUrl(page.url());
     if (restoredConversation !== conversation) throw new ChatGPTWebError("Conversation identity changed during project resolution.", { code: "CONVERSATION_IDENTITY_MISMATCH", conversationId: conversation, observed: restoredConversation });
     const operation = await this.prepareOperation({ operationId, kind: "move_conversation", payload: { conversationId: conversation, projectId: targetProject.projectId } });
-    await this.updateOperation(operation, "SUBMITTING");
     const options = page.locator("button[aria-label^='Open conversation options for']").last();
     await options.waitFor({ state: "visible", timeout: ACTION_TIMEOUT_MS });
     await options.evaluate((element) => element.click());
@@ -3207,6 +3205,7 @@ export class ChatGPTBrowser {
     await move.click();
     const target = page.getByRole("menuitem", { name: targetProject.name }).last();
     await target.waitFor({ state: "visible", timeout: ACTION_TIMEOUT_MS });
+    await this.updateOperation(operation, "SUBMITTING");
     await target.click();
     const projectUrl = new URL(`/g/${targetProject.projectId}/project`, CHATGPT_URL).toString();
     await navigate(page, projectUrl, { waitUntil: "domcontentloaded" }, this.signal());
