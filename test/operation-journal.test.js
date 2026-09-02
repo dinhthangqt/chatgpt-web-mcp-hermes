@@ -13,11 +13,24 @@ import {
   writeOperationJournal,
   compactJournal,
 } from "../src/operation-journal.js";
+import { envInt } from "../src/config.js";
 
 async function tempFile() {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "chatgpt-web-mcp-journal-"));
   return path.join(dir, "operation-journal.json");
 }
+
+test("envInt accepts defaults and valid integer strings and rejects invalid values", () => {
+  assert.equal(envInt("MISSING_TEST_ENV", 100, { min: 1, max: 1000 }), 100);
+  process.env.EMPTY_TEST_ENV = "";
+  assert.equal(envInt("EMPTY_TEST_ENV", 100, { min: 1, max: 1000 }), 100);
+  process.env.VALID_TEST_ENV = "100";
+  assert.equal(envInt("VALID_TEST_ENV", 1, { min: 1, max: 1000 }), 100);
+  for (const value of ["abc", "NaN", "Infinity", "-1", "1.5", "1001"]) {
+    process.env.INVALID_TEST_ENV = value;
+    assert.throws(() => envInt("INVALID_TEST_ENV", 100, { min: 1, max: 1000 }), /INVALID_TEST_ENV/);
+  }
+});
 
 test("journal preserves A then B and reconciles retry A after restart", async () => {
   const file = await tempFile();
